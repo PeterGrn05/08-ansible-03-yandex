@@ -1,0 +1,314 @@
+---
+- name: Install Latest ClickHouse
+  hosts: clickhouse-01
+  become: true
+  tags:
+    - clickhouse
+
+  tasks:
+    - name: Установка зависимостей
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: false
+
+    - name: Ensure GPG directory exists
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Install ClickHouse GPG key
+      ansible.builtin.shell:
+        cmd: |
+          curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+            | gpg --dearmor --yes -o /usr/share/keyrings/clickhouse-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/clickhouse-keyring.gpg
+
+    - name: Add ClickHouse repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/clickhouse.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=amd64] https://packages.clickhouse.com/deb stable main
+        mode: "0644"
+
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 36000
+
+    - name: Show available ClickHouse versions
+      ansible.builtin.shell:
+        cmd: apt-cache madison clickhouse-server
+      register: clickhouse_versions
+      changed_when: false
+
+    - name: Display available ClickHouse versions
+      ansible.builtin.debug:
+        var: clickhouse_versions.stdout_lines
+
+    - name: Install ClickHouse packages
+      ansible.builtin.apt:
+        name:
+          - "clickhouse-server={{ clickhouse_version }}"
+          - "clickhouse-client={{ clickhouse_version }}"
+          - "clickhouse-common-static={{ clickhouse_version }}"
+        state: present
+        allow_downgrade: true
+
+    - name: Ensure ClickHouse service is running and enabled
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: started
+        enabled: true
+
+    - name: Get ClickHouse version
+      ansible.builtin.command:
+        cmd: clickhouse-client --query "SELECT version()"
+      register: ch_version
+      changed_when: false
+
+    - name: Show installed version
+      ansible.builtin.debug:
+        msg: "Установлена версия ClickHouse: {{ ch_version.stdout }}"
+
+    - name: Check if logs database exists
+      ansible.builtin.command:
+        cmd: clickhouse-client --query "EXISTS DATABASE logs"
+      register: logs_database_exists
+      changed_when: false
+
+    - name: Create database
+      ansible.builtin.command:
+        cmd: clickhouse-client -q "CREATE DATABASE logs"
+      when: logs_database_exists.stdout | trim != "1"
+
+
+- name: Установка и настройка Nginx с Lighthouse
+  hosts: lighthouse-01
+  become: true
+  tags:
+    - lighthouse
+
+  tasks:
+    - name: Установка необходимых пакетов
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - unzip
+          - curl
+        state: present
+        update_cache: true
+
+    - name: Загрузка Lighthouse
+      ansible.builtin.get_url:
+        url: "https://github.com/VKCOM/lighthouse/archive/refs/heads/master.zip"
+        dest: "/tmp/lighthouse.zip"
+        mode: "0644"
+
+    - name: Создание целевой директории
+      ansible.builtin.file:
+        path: "/var/www/lighthouse"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Распаковка Lighthouse
+      ansible.builtin.unarchive:
+        src: "/tmp/lighthouse.zip"
+        dest: "/var/www/lighthouse"
+        remote_src: true
+        extra_opts:
+          - "-o"
+        creates: "/var/www/lighthouse/lighthouse-master/index.html"
+
+    - name: Установка прав доступа на каталог Lighthouse
+      ansible.builtin.file:
+        path: "/var/www/lighthouse"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Настройка конфигурации Nginx
+      ansible.builtin.template:
+        src: lighthouse.conf.j2
+        dest: "/etc/nginx/sites-available/lighthouse"
+        mode: "0644"
+        owner: root
+        group: root
+      notify: Перезапуск Nginx
+
+    - name: Активация сайта Lighthouse
+      ansible.builtin.file:
+        src: "/etc/nginx/sites-available/lighthouse"
+        dest: "/etc/nginx/sites-enabled/lighthouse"
+        state: link
+      notify: Перезапуск Nginx
+
+    - name: Отключение сайта по умолчанию
+      ansible.builtin.file:
+        path: "/etc/nginx/sites-enabled/default"
+        state: absent
+      notify: Перезапуск Nginx
+
+    - name: Запуск сервиса Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Перезапуск Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+
+
+- name: Install and configure Vector
+  hosts: vector-01
+  become: true
+  tags:
+    - vector
+
+  handlers:
+    - name: Restart Vector service
+      ansible.builtin.systemd:
+        name: vector
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+  tasks:
+    - name: Install dependencies
+      ansible.builtin.apt:
+        name:
+          - wget
+          - tar
+          - gzip
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Create installation directory
+      ansible.builtin.file:
+        path: "{{ vector_install_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download Vector
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+        dest: "/tmp/vector.tar.gz"
+        mode: "0644"
+        timeout: 30
+
+    - name: Extract Vector
+      ansible.builtin.unarchive:
+        src: "/tmp/vector.tar.gz"
+        dest: "{{ vector_install_dir }}"
+        remote_src: true
+        extra_opts:
+          - "--strip-components=1"
+        creates: "{{ vector_install_dir }}/bin/vector"
+
+    - name: Install Vector binary
+      ansible.builtin.copy:
+        src: "{{ vector_install_dir }}/vector-x86_64-unknown-linux-gnu/bin/vector"
+        dest: "/usr/local/bin/vector"
+        mode: "0755"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Verify Vector binary
+      ansible.builtin.command:
+        cmd: ls -la /usr/local/bin/vector
+      register: vector_binary_check
+      changed_when: false
+
+    - name: Create vector group
+      ansible.builtin.group:
+        name: vector
+        system: true
+        state: present
+
+    - name: Create vector user
+      ansible.builtin.user:
+        name: vector
+        group: vector
+        system: true
+        shell: /bin/false
+        home: /var/lib/vector
+
+    - name: Add vector to adm group
+      ansible.builtin.user:
+        name: vector
+        groups: adm
+        append: true
+
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: vector
+        group: vector
+        mode: "0755"
+      loop:
+        - path: "/etc/vector"
+        - path: "/var/lib/vector"
+        - path: "/var/log/vector"
+
+    - name: Deploy config
+      ansible.builtin.template:
+        src: vector.toml
+        dest: "{{ vector_config_path }}"
+        mode: "0640"
+        owner: vector
+        group: vector
+      notify: Restart Vector service
+
+    - name: Deploy systemd service
+      ansible.builtin.template:
+        src: vector.service.j2
+        dest: "/etc/systemd/system/vector.service"
+        mode: "0644"
+      notify: Restart Vector service
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start Vector
+      ansible.builtin.systemd:
+        name: vector
+        state: started
+        enabled: true
+
+    - name: Verify Vector installation
+      block:
+        - name: Check Vector version
+          ansible.builtin.command:
+            cmd: /usr/local/bin/vector --version
+          register: vector_version_check
+          changed_when: false
+
+        - name: Display Vector version
+          ansible.builtin.debug:
+            msg: "Successfully installed Vector version: {{ vector_version_check.stdout }}"
+
+      rescue:
+        - name: Show installation error
+          ansible.builtin.debug:
+            msg: "Vector installation verification failed"
+
+    - name: Check Vector service status
+      ansible.builtin.command:
+        cmd: systemctl status vector
+      register: vector_status
+      changed_when: false
+      ignore_errors: true
