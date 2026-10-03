@@ -1,0 +1,11 @@
+---
+lighthouse_packages:
+  - nginx
+  - unzip
+
+lighthouse_archive_url: "https://github.com/VKCOM/lighthouse/archive/refs/heads/master.tar.gz"
+lighthouse_archive_path: "/tmp/lighthouse.tar.gz"
+
+lighthouse_root: "/var/www/lighthouse"
+lighthouse_nginx_config: "/etc/nginx/sites-available/lighthouse.conf"
+lighthouse_nginx_enabled: "/etc/nginx/sites-enabled/lighthouse.conf"
